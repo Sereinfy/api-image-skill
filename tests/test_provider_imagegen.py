@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
+from urllib.request import Request
 from unittest.mock import patch
 
 import sys
@@ -12,6 +13,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from provider_imagegen.config import load_optional_image_provider_config
+from provider_imagegen.http_client import extract_images, redact_secret_text, request_secret
 from provider_imagegen.outputs import resolve_base_path
 from provider_imagegen.payloads import build_generation_payload
 
@@ -78,6 +80,30 @@ class PayloadValidationTests(unittest.TestCase):
     def test_transparent_jpeg_is_rejected(self):
         with self.assertRaises(ValueError):
             build_generation_payload(self.args("jpeg"), "test")
+
+
+class RedactionTests(unittest.TestCase):
+    def test_redacts_request_key_and_common_secret_patterns(self):
+        text = (
+            "key=custom-secret Bearer sk-abcdefghijklmnop "
+            "https://example.test/image?api_key=url-secret&token=token-secret"
+        )
+        redacted = redact_secret_text(text, ("custom-secret",))
+        self.assertNotIn("custom-secret", redacted)
+        self.assertNotIn("sk-abcdefghijklmnop", redacted)
+        self.assertNotIn("url-secret", redacted)
+        self.assertNotIn("token-secret", redacted)
+        self.assertIn("REDACTED", redacted)
+
+    def test_extract_images_redacts_api_key_in_malformed_response(self):
+        with self.assertRaises(ValueError) as context:
+            extract_images({"error": "custom-secret"}, timeout=None, api_key="custom-secret")
+        self.assertNotIn("custom-secret", str(context.exception))
+
+    def test_request_secret_reads_bearer_header(self):
+        request = Request("https://example.test")
+        request.add_header("Authorization", "Bearer custom-secret")
+        self.assertEqual(request_secret(request), ("custom-secret",))
 
 
 if __name__ == "__main__":

@@ -264,7 +264,7 @@ python "<skill-dir>\scripts\generate_image.py" `
 - 输入图像、参考图或蒙版：`POST <base_url>/images/edits`，multipart 表单
 - 优先从 `data[].b64_json` 解码图像
 - `b64_json` 不存在时，兼容读取 `data[].url`
-- 服务提供商返回 HTTP 错误时，脚本直接显示状态码和响应正文，不会改用其他服务提供商重试
+- 服务提供商返回 HTTP 错误时，脚本显示状态码和经过密钥脱敏、长度截断的响应正文，不会改用其他服务提供商重试
 
 ## 输出文件
 
@@ -293,6 +293,8 @@ provider-image-YYYYMMDD-HHMMSS.<format>
 - 蒙版校验失败：确保蒙版与第一张输入图像格式、尺寸一致，并包含 Alpha 通道。
 - `gpt-image-2` 使用 `input_fidelity`：移除该参数；使用透明背景时确认输出格式为 `png` 或 `webp`。
 - 图像尺寸不合法：检查 16 倍数、最长边、长宽比和总像素数限制。
+
+错误输出会自动隐藏请求中的 API 密钥、`Bearer` 凭据以及常见 URL 敏感查询参数，并将过长的服务商响应截断。
 
 ## 测试
 

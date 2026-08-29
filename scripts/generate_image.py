@@ -144,7 +144,7 @@ def request_images(args: argparse.Namespace, prompt: str, mode: str, timeout: in
     else:
         payload = build_generation_payload(args, prompt)
         response = post_json(f"{provider.base_url}{GENERATION_SUFFIX}", provider.api_key, payload, timeout)
-    return extract_images(response, timeout)
+    return extract_images(response, timeout, provider.api_key)
 
 
 def main() -> int:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import re
 import uuid
 import urllib.error
 import urllib.request
@@ -12,6 +13,13 @@ from pathlib import Path
 CRLF = b"\r\n"
 GENERATION_SUFFIX = "/images/generations"
 EDIT_SUFFIX = "/images/edits"
+MAX_ERROR_PREVIEW = 4000
+BEARER_PATTERN = re.compile(r"(\bBearer\s+)[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+KNOWN_KEY_PATTERN = re.compile(r"\bsk-[A-Za-z0-9_*-]{8,}\b")
+SENSITIVE_QUERY_PATTERN = re.compile(
+    r"([?&](?:api[_-]?key|access[_-]?token|token|signature|sig)=)[^&#\s]+",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -70,7 +78,9 @@ def read_json_response(request: urllib.request.Request, timeout: int | None) -> 
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code} from provider: {detail}") from exc
+        raise RuntimeError(
+            f"HTTP {exc.code} from provider: {redact_secret_text(detail, request_secret(request))}"
+        ) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Failed to connect to provider: {exc.reason}") from exc
 
@@ -107,10 +117,10 @@ def encode_file_part(file_part: FilePart, boundary_bytes: bytes) -> list[bytes]:
     ]
 
 
-def extract_images(response: dict, timeout: int | None) -> list[bytes]:
+def extract_images(response: dict, timeout: int | None, api_key: str | None = None) -> list[bytes]:
     data = response.get("data")
     if not isinstance(data, list) or not data:
-        preview = json.dumps(response, ensure_ascii=False)
+        preview = redact_secret_text(json.dumps(response, ensure_ascii=False), (api_key,) if api_key else ())
         raise ValueError(f"Provider response does not contain image data: {preview}")
     images = [fetch_image_bytes(item, timeout) for item in data]
     if not images:
@@ -127,3 +137,26 @@ def fetch_image_bytes(item: dict, timeout: int | None) -> bytes:
         with open_url(image_url, timeout) as response:
             return response.read()
     raise ValueError("Provider response item does not contain b64_json or url.")
+
+
+def request_secret(request: urllib.request.Request) -> tuple[str, ...]:
+    authorization = request.get_header("Authorization")
+    if not authorization:
+        authorization = request.headers.get("Authorization")
+    if not authorization:
+        return ()
+    prefix, _, token = authorization.partition(" ")
+    return (token,) if prefix.lower() == "bearer" and token else ()
+
+
+def redact_secret_text(text: str, secrets: tuple[str, ...] = ()) -> str:
+    redacted = text
+    for secret in secrets:
+        if secret:
+            redacted = redacted.replace(secret, "REDACTED")
+    redacted = BEARER_PATTERN.sub(r"\1REDACTED", redacted)
+    redacted = KNOWN_KEY_PATTERN.sub("sk-REDACTED", redacted)
+    redacted = SENSITIVE_QUERY_PATTERN.sub(r"\1REDACTED", redacted)
+    if len(redacted) > MAX_ERROR_PREVIEW:
+        redacted = redacted[:MAX_ERROR_PREVIEW] + "... [truncated]"
+    return redacted

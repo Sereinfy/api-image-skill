@@ -344,7 +344,7 @@ n=1
 - `--size`、`--quality`、`--background`、`--output-format`、`--output-compression`、`--input-fidelity`、`--moderation` 或 `--n` 不符合限制。
 - 服务商响应缺少 `data[].b64_json` 或可下载的 `data[].url`。
 
-服务商返回的错误应直接呈现给用户；不得伪造成功、吞掉错误或在错误后静默切换服务商。
+服务商返回的错误应在完成 API 密钥、`Bearer` 凭据和常见 URL 敏感参数脱敏后呈现给用户；过长响应应截断。不得伪造成功、吞掉错误或在错误后静默切换服务商。
 
 ## 13. 随附资源
 
