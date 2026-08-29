@@ -21,6 +21,10 @@ class FilePart:
 
 
 def open_url(target: str | urllib.request.Request, timeout: int | None):
+    if isinstance(target, str):
+        target = urllib.request.Request(target)
+    target.add_header("User-Agent", "api-image/1.0")
+
     if timeout is None:
         return urllib.request.urlopen(target)
     return urllib.request.urlopen(target, timeout=timeout)

@@ -1,0 +1,7 @@
+base_url = ""
+
+# api_key = "<API key>"
+api_key_env = "API_IMAGE_API_KEY"
+
+# [Environment]::SetEnvironmentVariable("API_IMAGE_API_KEY", "key", "User")
+# [Environment]::SetEnvironmentVariable("API_IMAGE_API_KEY", $null, "User")

@@ -86,11 +86,7 @@ def validate_background(background: str | None) -> str | None:
 
 
 def validate_model_background(model: str, background: str | None) -> str | None:
-    if model.strip().lower() == DEFAULT_MODEL and background == "transparent":
-        raise ValueError(
-            "--background transparent is not supported by official gpt-image-2. "
-            "Use auto or opaque, or choose a model/provider that explicitly supports transparency."
-        )
+    # Official gpt-image-2 supports transparent backgrounds in preview.
     return background
 
 

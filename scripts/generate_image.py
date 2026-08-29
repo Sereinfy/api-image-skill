@@ -14,6 +14,7 @@ from provider_imagegen.validation import (
     DEFAULT_QUALITY,
     DEFAULT_SIZE,
     DEFAULT_TIMEOUT,
+    validate_output_format,
     validate_timeout,
 )
 
@@ -23,7 +24,16 @@ def parse_args() -> argparse.Namespace:
         description="Generate or edit images using the provider configured in the user's Codex root."
     )
     parser.add_argument("--prompt", help="Image prompt.")
-    parser.add_argument("--prompt-file", help="UTF-8 text file with one prompt per non-empty line.")
+    parser.add_argument("--prompt-file", help="UTF-8 text file read in full as one image prompt.")
+    parser.add_argument(
+        "--prompt-list",
+        help="UTF-8 text file with one prompt per non-empty line; requires --batch.",
+    )
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Explicitly allow batch generation from --prompt-list.",
+    )
     parser.add_argument("--out", help="Output file path. Defaults to the current directory.")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Image model name.")
     parser.add_argument("--mode", choices=["auto", "generate", "edit"], default="auto")
@@ -35,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mask", help="Mask image path for localized edits.")
     parser.add_argument(
         "--background",
-        help="Background mode. Use auto or opaque for gpt-image-2; transparent is model/provider-specific.",
+        help="Background mode: auto, opaque, or transparent. gpt-image-2 transparent output is preview and requires png/webp.",
     )
     parser.add_argument("--output-format", help="png, jpeg, or webp.")
     parser.add_argument("--output-compression", type=int, help="0-100, only for jpeg/webp.")
@@ -46,6 +56,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--moderation", help="auto or low for supported GPT image models.")
     parser.add_argument("--codex-home", help="Override Codex root directory.")
     parser.add_argument("--base-url", help="Temporarily override the configured provider base_url.")
+    parser.add_argument(
+        "--base-url-env",
+        help="Environment variable containing a temporary provider base_url override.",
+    )
     parser.add_argument(
         "--api-key-env",
         help="Environment variable containing a temporary API key override. Preferred over --api-key.",
@@ -58,16 +72,34 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_prompts(prompt: str | None, prompt_file: str | None) -> list[str]:
-    if bool(prompt) == bool(prompt_file):
-        raise ValueError("Use exactly one of --prompt or --prompt-file.")
+def load_prompts(
+    prompt: str | None,
+    prompt_file: str | None,
+    prompt_list: str | None,
+    batch: bool,
+) -> list[str]:
+    source_count = sum(bool(value) for value in (prompt, prompt_file, prompt_list))
+    if source_count != 1:
+        raise ValueError("Use exactly one of --prompt, --prompt-file, or --prompt-list.")
+    if batch and not prompt_list:
+        raise ValueError("--batch is only valid with --prompt-list.")
     if prompt:
         return [prompt]
-    path = Path(prompt_file).expanduser()
+
+    if prompt_file:
+        path = Path(prompt_file).expanduser()
+        file_prompt = path.read_text(encoding="utf-8")
+        if not file_prompt.strip():
+            raise ValueError(f"Prompt file contains no prompt: {path}")
+        return [file_prompt]
+
+    if not batch:
+        raise ValueError("--prompt-list is batch mode and requires explicit --batch.")
+    path = Path(prompt_list).expanduser()
     prompts = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
     prompts = [line for line in prompts if line]
     if not prompts:
-        raise ValueError(f"Prompt file contains no prompts: {path}")
+        raise ValueError(f"Prompt list contains no prompts: {path}")
     return prompts
 
 
@@ -102,6 +134,7 @@ def request_images(args: argparse.Namespace, prompt: str, mode: str, timeout: in
     provider = load_provider_config(
         codex_home,
         base_url_override=args.base_url,
+        base_url_env=args.base_url_env,
         api_key_override=args.api_key,
         api_key_env=args.api_key_env,
     )
@@ -119,8 +152,9 @@ def main() -> int:
     timeout = validate_timeout(args.timeout)
     mode = determine_mode(args)
     validate_mode(args, mode)
-    prompts = load_prompts(args.prompt, args.prompt_file)
-    base_path = resolve_base_path(args.out)
+    prompts = load_prompts(args.prompt, args.prompt_file, args.prompt_list, args.batch)
+    output_format = validate_output_format(args.output_format)
+    base_path = resolve_base_path(args.out, output_format)
     for prompt_index, raw_prompt in enumerate(prompts):
         prompt = apply_image_roles(raw_prompt, args.image_role, len(args.image))
         print(f"Waiting for provider image {mode} job {prompt_index + 1}/{len(prompts)}...", file=sys.stderr)

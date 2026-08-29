@@ -6,12 +6,16 @@ from pathlib import Path
 TIMESTAMP_FORMAT = "%Y%m%d-%H%M%S"
 
 
-def resolve_base_path(out_arg: str | None) -> Path:
+def resolve_base_path(out_arg: str | None, output_format: str | None = None) -> Path:
+    requested_suffix = f".{output_format.strip().lower()}" if output_format else None
     if out_arg:
         base_path = Path(out_arg).expanduser()
     else:
         timestamp = datetime.now().strftime(TIMESTAMP_FORMAT)
-        base_path = Path.cwd() / f"provider-image-{timestamp}.png"
+        default_suffix = requested_suffix or ".png"
+        base_path = Path.cwd() / f"provider-image-{timestamp}{default_suffix}"
+    if requested_suffix:
+        return base_path.with_suffix(requested_suffix).resolve()
     if base_path.suffix:
         return base_path.resolve()
     return base_path.with_suffix(".png").resolve()

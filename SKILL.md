@@ -1,157 +1,269 @@
 ---
 name: api-image
-description: Mandatory replacement for the built-in `imagegen` flow. Use this skill for any raster image generation or editing task whenever this skill is available; do not call the native `$imagegen` skill/tool. Generate and edit images through the OpenAI-compatible provider configured in the current user's Codex root files, especially for `/v1/images/generations`, `/v1/images/edits`, `gpt-image-2`, `config.toml`, `auth.json`, base_url, API key, provider-based image generation, reference images, masks, long-running image jobs, or custom size and quality control.
+description: 使用当前配置的 OpenAI 兼容服务提供商完成图像生成、参考图生成、图像编辑、局部修补、背景替换、风格迁移、合成和批量变体任务。此 Skill 可替代内置 `imagegen`，支持 `/v1/images/generations`、`/v1/images/edits`、`gpt-image-2`、`api-image.toml`、`auth.json`、`config.toml`、API 密钥、参考图、蒙版、自定义尺寸、质量和长时间运行任务。
 ---
 
-# API Image
+# API 图像
 
-Use this skill as the mandatory replacement for the built-in `imagegen` workflow.
+## 1. 定位与硬性原则
 
-Routing rule:
+- 本 Skill 可用时，所有位图生成或编辑任务都必须通过本 Skill 完成，不得调用原生 `$imagegen` 或其他内置图像生成工具。
+- 适用任务包括文生图、参考图生成、图像编辑、局部编辑、背景替换、风格迁移、合成、批量变体和批量提示词处理。
+- 只有用户明确要求不使用本 Skill 时，才允许改用其他图像工具。
+- API 密钥不得硬编码到 Skill、脚本、README、日志、提示词文件或最终回复中。
+- 配置解析、网络请求和输出写入必须在任何图像请求前完成校验；配置错误或服务商错误不得静默切换到其他服务商重试。
 
-- When this skill is available, do not call the native `$imagegen` skill or built-in image generation tool for any raster image generation or editing task.
-- Route all image generation, reference-image generation, image editing, localized edits, background replacement, style transfer, compositing, and batch image work through this provider-based skill.
-- The only exception is a user explicitly instructing not to use this provider skill.
+## 2. 执行总流程
 
-## Workflow
+按以下顺序执行，不跳过必要校验：
 
-1. Resolve the Codex root.
-   - Prefer an explicit `--codex-home` argument when the user provides one.
-   - Otherwise use `$CODEX_HOME`.
-   - Otherwise use `~/.codex`.
-2. Resolve this skill's directory.
-   - Treat the directory containing this `SKILL.md` as `<skill-dir>`.
-   - Run the bundled script as `<skill-dir>/scripts/generate_image.py`, not as a path relative to the current workspace.
-3. Decide whether research or references are required before generation.
-   - Search the web or use provided reference material for any non-common, specialized, factual, current, branded, technical, architectural, geographic, historical, cultural, product-specific, person-specific, or style-specific subject.
-   - Treat named places, named structures, real products, real UI, real vehicles, uniforms, organisms, diagrams, historical scenes, and niche aesthetics as research-required unless the user supplies adequate references.
-   - Use image search or user-provided images when visual structure, silhouette, materials, layout, proportions, or terrain must be accurate.
-   - Be proactive about reference images. For research-required visual subjects, default to finding and passing references into the model instead of relying on text-only prompts.
-   - Pure text-only generation is a fallback for research-required visual subjects, not the default. Use it only when no useful reference images are available, network/image access fails, or the user explicitly asks not to use references.
-   - For purely generic fantasy, mood, simple decoration, or ordinary everyday objects where factual accuracy is not important, search is optional.
-   - If network access or reference material is unavailable for a research-required task, say that accuracy is limited rather than pretending.
-4. Read the active provider settings from the user's root files.
-   - Read `auth.json` and use `OPENAI_API_KEY`.
-   - Read `config.toml`, then use `model_provider` and `[model_providers.<name>].base_url`.
-   - Never hardcode a provider URL or API key into the skill.
-   - Default to the root files above. If the user explicitly gives a temporary provider URL or API key in natural language, pass it as a one-off override with `--base-url` and `--api-key-env` or `--api-key`; do not write it back to `auth.json`, `config.toml`, README, logs, or generated files.
-   - Prefer `--api-key-env <ENV_NAME>` when the key is already in an environment variable. Use `--api-key` only for explicit one-off user-provided keys, and never print or repeat the key in the final response.
-5. Decide the intent and input image roles.
-   - If the user wants a new image from text only, treat it as generation.
-   - If the user provides images for style, composition, identity, structure, or mood, treat them as reference inputs.
-   - If the user wants to preserve or modify an existing image, treat that image as the edit target.
-   - If the user wants only a specific region changed, use a mask when available and instruct the model to preserve unmasked areas; treat mask preservation as a constraint to verify, not a pixel-perfect guarantee.
-   - Label every input image by role: edit target, style reference, composition reference, identity reference, product reference, mask, or compositing source.
-6. Choose the endpoint.
-   - Use `<base_url>/images/generations` for text-only generation.
-   - Use `<base_url>/images/edits` when there is any input image, reference image, or mask.
-   - Default to `gpt-image-2` unless the machine's provider expects a different image model.
-7. Build a structured prompt.
-   - Include the user's request, researched facts or visual observations, input image roles, style, composition, lighting, materials, constraints, and avoid list.
-   - Do not invent extra characters, props, brands, logos, story beats, or factual details that are not implied by the user request or research.
-8. For official GPT Image models, decode `data[].b64_json`. Treat `data[].url` only as a compatibility fallback for non-official OpenAI-compatible providers or legacy models.
-9. Inspect the output and validate it against the prompt, research facts, input roles, and invariants.
-10. Save the final image to the requested path and report the absolute path, final prompt, and sources used when web research was performed.
+1. 确定 `<skill-dir>` 和 Codex 根目录。
+2. 解析服务商配置，验证 API 密钥与 `base_url` 的来源和配对关系。
+3. 判断任务是 `generate` 还是 `edit`，并确定每张输入图像的角色。
+4. 判断是否需要网络研究或参考图；必要时先收集资料并保存参考图。
+5. 构建结构化提示词，写明主体、风格、构图、光照、材料、约束和避免项。
+6. 校验尺寸、质量、输入图像、蒙版和模型专属参数。
+7. 选择 API 端点并调用随附脚本。
+8. 解码服务商响应，保存图像，检查输出是否符合用户要求，并报告绝对路径。
 
-## Root Files
+## 3. 配置系统
 
-Default root files:
+### 3.1 路径
 
-- Windows: `%USERPROFILE%\\.codex\\auth.json` and `%USERPROFILE%\\.codex\\config.toml`
-- General rule: `$CODEX_HOME/auth.json` and `$CODEX_HOME/config.toml`, otherwise `~/.codex/auth.json` and `~/.codex/config.toml`
+- `<skill-dir>` 是包含本文件的目录；脚本固定从该目录读取 `api-image.toml`，不得按当前工作目录或 Codex 根目录寻找。
+- Codex 根目录按以下顺序确定：命令行 `--codex-home`、环境变量 `CODEX_HOME`、Windows 下的 `%USERPROFILE%\\.codex` 或其他系统下的 `~/.codex`。
+- 每次运行都重新读取配置文件和环境变量，不缓存上一次结果。
 
-This skill must always read the current files at runtime. The provider may differ from machine to machine.
+### 3.2 服务商优先级
 
-Temporary overrides:
+从上到下选择第一组完整且有效的配置：
 
-- Default behavior reads the Codex root files above.
-- Use `--base-url <https://provider.example/v1>` to temporarily override the configured Provider URL.
-- Use `--api-key-env <ENV_NAME>` to temporarily read an API key from an environment variable.
-- Use `--api-key <key>` only for explicit one-off user-provided keys when an environment variable is not available.
-- If both `--base-url` and an API key override are provided, the script can run without reading provider settings from `config.toml`; otherwise missing values fall back to the Codex root files.
-- Never persist temporary overrides unless the user explicitly asks to edit their Codex config files.
+1. 命令行临时覆盖
+2. `<skill-dir>/api-image.toml`
+3. `OPENAI_IMAGE_API_KEY` + `OPENAI_IMAGE_BASE_URL`
+4. `OPENAI_API_KEY` + `OPENAI_BASE_URL`
+5. Codex 根目录的 `auth.json` + `config.toml`
 
-## Command
+每个优先级代表一个完整的服务商身份，不得跨层拼接 API 密钥和 URL。更高层命中后忽略所有更低层；高层配置出错时直接停止，不回退。
 
-Use the bundled script for normal text-to-image generation:
+### 3.3 `api-image.toml`
+
+文件支持三个字段：
+
+```toml
+base_url = "https://provider.example.com/v1"
+# api_key = "<API 密钥>"
+api_key_env = "API_IMAGE_API_KEY"
+```
+
+密钥选择顺序：
+
+1. `api_key` 有非空值时直接使用。
+2. `api_key` 为空或未提供时，使用 `api_key_env` 作为环境变量名，再读取该变量的值。
+3. 两个密钥字段都为空时，跳过此配置层并继续下一级。
+
+补充规则：
+
+- `base_url` 必须是 `http://` 或 `https://`，并与密钥来自同一配置层。
+- 配置了密钥字段但缺少 `base_url` 时，立即报错。
+- 已配置 `api_key_env` 但对应环境变量为空或未设置时，立即报错。
+- `base_url`、`api_key`、`api_key_env` 全部为空时，视为禁用此层。
+- 不建议把真实密钥写入 TOML；优先使用 `api_key_env`。
+
+设置环境变量示例：
 
 ```powershell
-python "<skill-dir>\scripts\generate_image.py" `
+$env:API_IMAGE_API_KEY = "<API 密钥>"
+```
+
+### 3.4 环境变量和 Codex 根目录
+
+图像专用环境变量必须成对出现：
+
+```powershell
+$env:OPENAI_IMAGE_API_KEY = "<API 密钥>"
+$env:OPENAI_IMAGE_BASE_URL = "https://provider.example.com/v1"
+```
+
+通用环境变量也必须成对出现：
+
+```powershell
+$env:OPENAI_API_KEY = "<API 密钥>"
+$env:OPENAI_BASE_URL = "https://provider.example.com/v1"
+```
+
+未命中上述配置时：
+
+- 从 `auth.json` 读取 `OPENAI_API_KEY`。
+- 从 `config.toml` 读取 `model_provider`，再读取对应 `[model_providers.<name>].base_url`。
+- 任一必需字段缺失、为空或类型错误都必须报错。
+
+不得默认补入 OpenAI 官方 URL，也不得从不同来源拼出不完整配对。
+
+## 4. 任务路由
+
+### 4.1 模式
+
+- 仅有文字提示词：`generate`。
+- 有任意 `--image` 或 `--mask`：`edit`。
+- `--mode auto` 时按上述规则自动判断。
+- `--mode edit` 没有 `--image` 必须报错。
+- `generate` 模式不得携带 `--image` 或 `--mask`。
+
+### 4.2 端点
+
+| 任务 | 端点 | 请求格式 |
+| --- | --- | --- |
+| 文生图 | `<base_url>/images/generations` | JSON |
+| 参考图、编辑、蒙版、合成 | `<base_url>/images/edits` | `multipart/form-data` |
+
+默认模型为 `gpt-image-2`；只有服务商要求其他模型时才使用 `--model` 覆盖。
+
+### 4.3 输入图像角色
+
+每张输入图像都要明确角色，可使用 `--image-role` 附加到提示词：
+
+- `编辑目标`
+- `风格参考`
+- `构图参考`
+- `身份参考`
+- `产品参考`
+- `地形参考`
+- `蒙版`
+- `合成来源`
+
+有蒙版时，第一个 `--image` 必须是编辑目标；其他图像只能作为参考或合成来源。蒙版约束是需要验证的目标，不承诺像素级不变。
+
+## 5. 研究与参考资料
+
+### 5.1 需要研究的主题
+
+对以下主题默认先研究：真实地点、建筑、桥梁、产品、车辆、机器、用户界面、制服、文化服饰、历史场景、生物、地图、技术图表、当前状态或小众艺术风格。
+
+研究目的：确认结构、比例、材料、地形、功能、颜色、周围环境和相机角度等事实，避免生成泛化或错误结果。
+
+### 5.2 参考图策略
+
+- 视觉结构、轮廓、比例、材料或地形需要准确时，优先寻找并下载至少一张参考图。
+- 可使用多张互补参考图，分别承担主体结构、环境地形或构图角度等角色。
+- 参考图应传给脚本并标注角色，不得把所有图像都当作编辑目标。
+- 参考图生成应要求模型创作新图，不得完全复制源照片。
+- 若无法访问网络或参考图，应明确说明准确性受限；不得假装已完成研究。
+- 服务商拒绝参考图编辑请求时，直接报告错误；只有用户接受时才讨论纯文本后备方案，不得静默回退。
+
+### 5.3 研究结果进入提示词
+
+只加入与任务相关的事实。不得凭空添加人物、道具、品牌、标志、故事或其他用户未要求的细节。
+
+## 6. 提示词规范
+
+提示词应尽量包含以下信息：
+
+```text
+用途：<photorealistic-natural|product-mockup|ui-mockup|infographic-diagram|logo-brand|illustration-story|stylized-concept|historical-scene|text-localization|identity-preserve|precise-object-edit|lighting-weather|background-extraction|style-transfer|compositing|sketch-to-render>
+资产类型：<使用位置>
+主要请求：<用户原始需求>
+研究事实/视觉参考：<仅列相关事实和观察>
+输入图像：<图像 1：角色；图像 2：角色>
+场景/背景：<环境>
+主体：<主要主体>
+风格/媒介：<照片、插画、3D 等>
+构图/取景：<视角、镜头、位置>
+光照/氛围：<光照和氛围>
+材料/纹理：<表面细节>
+文字（逐字）："<需要精确呈现的文字>"
+约束：<必须保留或必须修改>
+避免：<负面约束>
+```
+
+默认使用用户的语言；提示词可包含换行。迭代时一次只改变一个主要因素，便于判断结果差异。
+
+## 7. 命令与参数
+
+### 7.1 单条文生图
+
+```powershell
+python "<skill-dir>\\scripts\\generate_image.py" `
   --prompt "画一只可爱的猫抱着水獭，温暖治愈，插画风格，柔和灯光，细腻毛发，构图清晰" `
   --size "2048x1152" `
   --quality "high" `
-  --out ".\outputs\cute-cat-otter.png"
+  --out ".\\outputs\\cute-cat-otter.png"
 ```
 
-Use the same script for reference-image generation or edits:
+### 7.2 参考图或编辑
 
 ```powershell
-python "<skill-dir>\scripts\generate_image.py" `
+python "<skill-dir>\\scripts\\generate_image.py" `
   --prompt "参考输入图的构图和角色姿势，生成一张暖色电影感插画" `
-  --image "C:\path\to\reference.png" `
-  --image-role "composition and pose reference" `
+  --image "C:\\path\\to\\reference.png" `
+  --image-role "构图和姿势参考" `
   --size "2048x2048" `
   --quality "high" `
-  --out ".\outputs\reference-output.png"
+  --out ".\\outputs\\reference-output.png"
 ```
 
-Use `--mask` for localized edits:
+### 7.3 局部编辑
 
 ```powershell
-python "<skill-dir>\scripts\generate_image.py" `
-  --prompt "只把被 mask 标出的区域替换成一只小水獭，保持其他区域不变" `
-  --image "C:\path\to\source.png" `
-  --mask "C:\path\to\mask.png" `
-  --out ".\outputs\masked-edit.png"
+python "<skill-dir>\\scripts\\generate_image.py" `
+  --prompt "只把被蒙版标出的区域替换成一只小水獭，保持其他区域不变" `
+  --image "C:\\path\\to\\source.png" `
+  --mask "C:\\path\\to\\mask.png" `
+  --out ".\\outputs\\masked-edit.png"
 ```
 
-For web-researched subjects, download selected reference images to a working folder first, then pass them as `--image`:
+### 7.4 批量规则
+
+- 默认使用 `--prompt`，即使提示词包含多行或多个段落。
+- 已存在的长提示词文件可使用 `--prompt-file`，其全部内容视为一条提示词。
+- 只有用户明确要求“批量生成”“逐条生成列表”或“每行作为独立提示词”时，才允许使用 `--prompt-list <path> --batch`。
+- `--prompt-list` 必须与 `--batch` 同时使用；不得仅因文本有多行、编号、多个主题或文件名而自行推断批量意图。
+- `--prompt`、`--prompt-file`、`--prompt-list` 必须且只能选一个。
+
+### 7.5 常用参数
+
+| 参数 | 说明 |
+| --- | --- |
+| `--model` | 默认 `gpt-image-2` |
+| `--mode` | `auto`、`generate`、`edit` |
+| `--size` | 默认 `2048x1152`；也可用 `auto` |
+| `--quality` | `low`、`medium`、`high`、`auto`；默认 `high` |
+| `--n` | 每条提示词生成 1 至 10 张；默认 1 |
+| `--image` | 可重复，最多 16 张，每张不超过 50 MB |
+| `--image-role` | 可重复，数量不得超过 `--image` |
+| `--mask` | 局部编辑蒙版 |
+| `--background` | `auto`、`opaque`、`transparent` |
+| `--output-format` | `png`、`jpeg`、`webp` |
+| `--output-compression` | 0 至 100，仅适用于 `jpeg` 或 `webp` |
+| `--input-fidelity` | `low` 或 `high`；`gpt-image-2` 不支持 |
+| `--moderation` | `auto` 或 `low` |
+| `--codex-home` | 覆盖 Codex 根目录 |
+| `--timeout` | 默认 1800 秒；`0` 表示不设客户端超时 |
+| `--out` | 输出路径；显式指定 `--output-format` 时自动匹配扩展名，缺省时生成带时间戳的文件名 |
+
+## 8. 配置临时覆盖
+
+临时覆盖必须同时提供 URL 和 API 密钥，并且每类参数只能选一种来源：
+
+- URL：`--base-url` 或 `--base-url-env <ENV_NAME>`
+- 密钥：`--api-key` 或 `--api-key-env <ENV_NAME>`
+
+优先使用 `--api-key-env`，仅在用户明确提供一次性密钥并接受命令行暴露风险时使用 `--api-key`。
 
 ```powershell
-python "<skill-dir>\scripts\generate_image.py" `
-  --prompt "Create a new 4K overhead aerial image of Huajiang Grand Canyon Bridge in Guizhou, based on the reference images. Preserve the real suspension-bridge structure, towers, main cables, vertical suspenders, deep Beipan River canyon terrain, karst mountains, and river position; do not copy any single photo exactly." `
-  --image "C:\path\to\refs\huajiang-bridge-aerial.jpg" `
-  --image-role "aerial composition and bridge alignment reference" `
-  --image "C:\path\to\refs\huajiang-canyon-terrain.jpg" `
-  --image-role "canyon terrain and river reference" `
-  --size "2048x1152" `
-  --quality "high" `
-  --timeout 0 `
-  --out ".\outputs\huajiang-canyon-bridge-overhead.png"
+$env:JOB_IMAGE_API_KEY = "<临时 API 密钥>"
+python "<skill-dir>\\scripts\\generate_image.py" `
+  --prompt "一张赛博朋克风格的夜景照片" `
+  --base-url "https://provider.example.com/v1" `
+  --api-key-env "JOB_IMAGE_API_KEY" `
+  --out ".\\outputs\\temporary-provider.png"
 ```
 
-Useful options:
+临时覆盖只对本次运行有效，不得写回 `api-image.toml`、`auth.json` 或 `config.toml`。缺少 URL 或密钥中的任一项时，必须在网络请求前报错。
 
-- `--model gpt-image-2`
-- `--mode auto|generate|edit`
-- `--size 2048x1152` script default 2K landscape
-- `--size 1024x1024`
-- `--size 1536x1024`
-- `--size 1024x1536`
-- `--size 2048x2048`
-- `--size 3840x2160`
-- `--size auto` for official API auto sizing
-- `--quality low|medium|high|auto`
-- `--n 1`
-- `--image <path>` repeated up to 16 times
-- `--image-role <role>` to label input images inside the prompt
-- `--mask <path>` for localized edits
-- `--background auto|opaque` for official `gpt-image-2`
-- `--output-format png|jpeg|webp`
-- `--output-compression 0-100` for `jpeg` or `webp`
-- `--input-fidelity low|high` for supported edit models only; do not send it for `gpt-image-2`
-- `--moderation auto|low` for supported GPT image models
-- `--prompt-file <path>` for one prompt per non-empty line
-- `--codex-home <path>`
-- `--base-url <https://provider.example/v1>` temporary Provider URL override
-- `--api-key-env <ENV_NAME>` temporary API key override from an environment variable
-- `--api-key <key>` temporary direct API key override, only when explicitly provided
-- `--timeout 1800`
-- `--timeout 0`
+## 9. 请求与响应
 
-## Payload Shape
-
-Use the provider's generation endpoint with this body shape:
+### 9.1 `generations` JSON
 
 ```json
 {
@@ -163,11 +275,11 @@ Use the provider's generation endpoint with this body shape:
 }
 ```
 
-Use the provider's edit endpoint as multipart form data:
+### 9.2 `edits` multipart
 
 ```text
 model=gpt-image-2
-prompt=<edit or reference prompt>
+prompt=<编辑或参考提示词>
 image[]=@source-or-reference.png
 mask=@mask.png
 size=1024x1024
@@ -175,155 +287,67 @@ quality=high
 n=1
 ```
 
-Start with `n=1`. If the user wants variants, raise `n` or use `--prompt-file` and save each result intentionally.
+输入图像使用重复的 `image[]` 字段。第一个输入图像是编辑目标时，蒙版必须与它格式、尺寸一致并包含 Alpha 通道。
 
-## Temporary Provider Overrides
+响应解析顺序：
 
-If the user says in natural language that this image job should use a different Provider URL or API key, treat it as a temporary runtime override:
+1. 优先解码 `data[].b64_json`。
+2. 对非官方 OpenAI 兼容服务商或旧版模型，才将 `data[].url` 作为后备并下载图像。
+3. 缺少可解码图像数据时直接报错。
 
-```powershell
-$env:API_IMAGE_API_KEY = "<temporary key>"
-python "<skill-dir>\scripts\generate_image.py" `
-  --prompt "一张赛博朋克风格的夜景照片" `
-  --base-url "https://provider.example/v1" `
-  --api-key-env "API_IMAGE_API_KEY" `
-  --out ".\outputs\override-provider.png"
-```
+## 10. 模型与输入校验
 
-Rules:
+### 10.1 尺寸
 
-- Default to the Codex root configuration when no override is requested.
-- Do not modify `auth.json` or `config.toml` for temporary overrides.
-- Do not echo API keys back to the user.
-- Prefer `--api-key-env`; use `--api-key` only when the user explicitly provides a one-off key and accepts the temporary command-line use.
+显式尺寸必须满足：
 
-## gpt-image-2 API Notes
+- 宽和高都是 16 的倍数。
+- 最长边不超过 3840 像素。
+- 长宽比不超过 3:1。
+- 总像素数在 655,360 至 8,294,400 之间。
 
-For official OpenAI `gpt-image-2`:
+常用有效尺寸：`1024x1024`、`1536x1024`、`1024x1536`、`2048x2048`、`2048x1152`、`3840x2160`、`2160x3840`。不合法时必须报错，不得静默调整。
 
-- Text-only generation uses `POST /v1/images/generations` with JSON.
-- Any input image, reference image, or mask uses `POST /v1/images/edits` with multipart form-data.
-- Use repeated `image[]=@path` fields for multiple input/reference images.
-- When using `mask`, the first `--image` must be the edit target; additional images should be references or compositing sources.
-- Read image bytes from `data[].b64_json`; URL output is not supported for official GPT Image models.
-- Do not send `input_fidelity`; `gpt-image-2` always processes image inputs at high fidelity.
-- Do not request `background: transparent`; official `gpt-image-2` currently supports `auto` or `opaque`, not transparent backgrounds.
-- For masked edits, validate that the mask and first source image have the same dimensions and compatible format, are under the image API file-size limit, and that the mask includes an alpha channel.
+### 10.2 `gpt-image-2` 专属限制
 
-## Capability Map
+- `gpt-image-2` 当前支持透明背景；该能力处于 `preview`，使用 `background: transparent` 时输出格式必须是 `png` 或 `webp`。
+- 不得传入 `input_fidelity`；该模型始终以高保真度处理图像输入。
+- 蒙版必须与第一个编辑目标格式、尺寸一致，且包含 Alpha 通道。
+- 其他模型是否支持透明背景、`input_fidelity` 或 `moderation`，以服务商能力为准；透明背景同时受输出格式限制。
 
-- New text-to-image generation: supported through `/images/generations`.
-- Batch generation: supported through `--n` for multiple variants per prompt, or `--prompt-file` for many prompts.
-- Reference-image generation: supported through `/images/edits` with one or more `--image` inputs and role labels in the prompt.
-- Image editing: supported through `/images/edits` with `--image` and an edit prompt.
-- Localized edits / inpainting: supported through `/images/edits` with `--image` plus `--mask`.
-- Background replacement: supported as an edit prompt, with `--mask` when the replacement area must be constrained.
-- Style transfer: supported as reference-image editing; label the source image role and describe the desired style in the prompt.
-- Input image role labeling: not a separate API field; this script appends `--image-role` labels to the prompt so the model can interpret each input image intentionally.
-- Transparent background: official `gpt-image-2` does not currently support `background: transparent`. Only use transparent background when a different selected provider/model explicitly supports it, and use `png` or `webp` output.
+### 10.3 输入文件
 
-## Research And References
+- `--image` 最多 16 个文件，每个不超过 50 MB。
+- 输入路径必须存在且为普通文件。
+- 仅支持可识别的 `PNG`、`JPEG`、`WebP`；无法检查格式或尺寸时必须报错。
 
-Do not assume the image model knows every subject accurately. Research first or use references when the subject is not common visual knowledge.
+## 11. 等待、输出与验证
 
-Reference images are the preferred path for visually constrained research-required tasks. Text research describes facts; reference images carry visual structure. Use both whenever feasible.
+- 脚本为同步流程；服务商完成任务或返回明确错误前不会退出。
+- 默认客户端超时为 1800 秒；长任务应使用更长超时或 `--timeout 0`，调用方不得使用过短的 shell 超时。
+- 输出目录会自动创建，脚本向标准输出打印每个最终绝对路径。
+- 单张结果使用指定文件名；显式指定 `--output-format` 时自动匹配扩展名。多个变体追加 `-v1`、`-v2`；多条提示词追加 `-p1`、`-p2`；两者同时存在时使用 `-pN-vN`。
+- 保存后检查文件确实可读，并依据用户提示词、研究事实、输入图像角色和必须保留的约束进行验证。
+- 使用网络研究时，最终回复应包含输出绝对路径、最终提示词和所用来源；不得包含 API 密钥。
 
-Research-required examples:
+## 12. 失败处理
 
-- A named structure or location, such as `贵州花江峡谷大桥` or any real bridge, landmark, terrain, skyline, or building.
-- A real product, vehicle, machine, UI, logo-free product silhouette, game asset from a known franchise, or fashion item.
-- A historical scene, cultural garment, uniform, heraldry, ritual object, weapon, architecture style, organism, map, technical diagram, or scientific subject.
-- A current or recently changed subject.
-- A niche visual style or artist-adjacent style where references are necessary to avoid generic output.
+在发起请求前，以下情况必须明确报错并停止：
 
-Research workflow:
+- 服务商配置不完整、字段类型错误、URL 不是 `http://` 或 `https://`。
+- `api_key_env` 指向的环境变量为空或未设置。
+- 命令行临时覆盖缺少 URL 或密钥，或同时指定直接值和环境变量来源。
+- 未找到任何有效服务商配置；不得默认使用官方 URL。
+- `--prompt`、`--prompt-file`、`--prompt-list` 使用错误，或批量模式未获得明确授权。
+- 编辑模式缺少 `--image`，或生成模式携带输入图像或蒙版。
+- 输入图像、蒙版格式、尺寸、Alpha 通道或文件大小不符合要求。
+- `--size`、`--quality`、`--background`、`--output-format`、`--output-compression`、`--input-fidelity`、`--moderation` 或 `--n` 不符合限制。
+- 服务商响应缺少 `data[].b64_json` 或可下载的 `data[].url`。
 
-- Search the web for factual text details when structure, function, history, geography, or current status matters.
-- Use image search or provided images for visual details such as shape, terrain, materials, proportions, colors, and surrounding environment.
-- For named structures, real locations, real products, real vehicles, historical/cultural visual subjects, technical diagrams, and niche styles, actively collect at least one useful reference image before generating.
-- Prefer multiple complementary references when possible: one for subject structure, one for surrounding environment, and one for desired camera angle/composition.
-- Download reference images to a local working path before invoking the script, then pass them with `--image` and `--image-role`.
-- If a reference image is low quality but still useful, label its role narrowly, for example `rough terrain reference only`.
-- Extract only the details needed for the prompt; keep the prompt concise.
-- Include factual constraints in the prompt, for example bridge type, deck/tower/cable arrangement, canyon terrain, river position, viewpoint, and surrounding landforms.
-- Cite sources in the final response whenever web research was used.
+服务商返回的错误应直接呈现给用户；不得伪造成功、吞掉错误或在错误后静默切换服务商。
 
-Reference workflow:
+## 13. 随附资源
 
-- Prefer provided reference images over memory when visual fidelity matters.
-- For each `--image`, pass a matching `--image-role` such as `edit target`, `style reference`, `composition reference`, `product reference`, or `terrain reference`.
-- Do not treat every image as an edit target; decide whether it is reference-only or should be preserved and modified.
-- For compositing, state exactly what comes from each input and how lighting, perspective, scale, and shadows should match.
-- For reference-only generation, prompt the model to create a new image based on the references, not to copy a single source photo exactly.
-- If the image model/provider rejects a reference-image edit request, surface that error and then decide whether a text-only generation is acceptable for this task. Do not silently fall back.
-
-## Prompt Structure
-
-Use this compact schema when it helps:
-
-```text
-Use case: <photorealistic-natural|product-mockup|ui-mockup|infographic-diagram|logo-brand|illustration-story|stylized-concept|historical-scene|text-localization|identity-preserve|precise-object-edit|lighting-weather|background-extraction|style-transfer|compositing|sketch-to-render>
-Asset type: <where the image will be used>
-Primary request: <user request>
-Research facts / visual references: <only the relevant observed details>
-Input images: <Image 1: role; Image 2: role>
-Scene/backdrop: <environment>
-Subject: <main subject>
-Style/medium: <photo/illustration/3D/etc>
-Composition/framing: <viewpoint, lens/framing, placement>
-Lighting/mood: <lighting and mood>
-Materials/textures: <surface details>
-Text (verbatim): "<exact text if needed>"
-Constraints: <must keep/must avoid>
-Avoid: <negative constraints>
-```
-
-## Waiting Behavior
-
-- This script is synchronous. It does not return before the provider finishes the image job or an explicit error occurs.
-- Default timeout is `1800` seconds so long-running jobs are not cut off too early.
-- Use `--timeout 0` to disable the client-side timeout and wait indefinitely for the provider response.
-- When invoking this script from Codex, give the shell command a timeout that is longer than the expected image job. Do not use a short shell timeout for long generations.
-
-## Size And Quality
-
-Follow the current official GPT Image rules for `gpt-image-2`:
-
-- `size` can be `auto` or any `<width>x<height>` string that satisfies all of these:
-- width and height are multiples of `16`
-- the longest edge is at most `3840`
-- the long-edge to short-edge ratio is at most `3:1`
-- total pixels are between `655,360` and `8,294,400`
-- this script defaults to `2048x1152`; the official API's default sizing behavior is `auto`
-- common examples: `1024x1024`, `1536x1024`, `1024x1536`, `2048x2048`, `2048x1152`, `3840x2160`, `2160x3840`
-- `quality` can be `low`, `medium`, `high`, or `auto`; this script defaults to `high`, while official API auto quality is available with `auto`
-- 2K and 4K requests are valid when they satisfy those constraints
-- Do not silently coerce unsupported sizes. Raise a clear error instead.
-
-## Prompting
-
-- Prefer concrete prompts with subject, style, lighting, and composition.
-- Use the user's language by default. Chinese prompts are valid for this workflow.
-- Change one aspect at a time when iterating.
-
-## Output Rules
-
-- Save project assets inside the project workspace when the user wants a usable asset.
-- Save preview images to a clear temporary or user-requested path.
-- If `n > 1`, keep filenames deterministic by appending `-1`, `-2`, and so on.
-
-## Failure Rules
-
-- Raise explicit errors when `OPENAI_API_KEY`, `model_provider`, or `base_url` cannot be found.
-- Allow temporary Provider overrides with `--base-url`, `--api-key-env`, or `--api-key`; do not persist them unless explicitly requested.
-- Raise explicit errors when both `--api-key` and `--api-key-env` are provided, when the named environment variable is empty, or when `--base-url` is not an HTTP(S) URL.
-- Raise explicit errors when `size` violates the official GPT Image constraints or `quality` is unsupported.
-- Raise explicit errors when edit/reference mode is requested without input images.
-- Raise explicit errors when `gpt-image-2` is used with `--background transparent` or `--input-fidelity`.
-- Raise explicit errors when a mask is not compatible with the first `--image` edit target, has different dimensions, lacks an alpha channel, or exceeds the image API file-size limit.
-- Surface provider errors directly. Do not fabricate a success result.
-- If the provider uses a different image model name on this machine, override `--model`.
-
-## Resource
-
-- `scripts/generate_image.py`: Read the current user's Codex root files, call the configured provider's image endpoint, and save the returned image data.
+- `api-image.toml`：命令行覆盖之后的最高优先级持久化服务商配置；`api_key` 优先于 `api_key_env`。
+- `scripts/generate_image.py`：解析参数、读取配置、构建请求、调用图像端点并保存结果。
+- `scripts/provider_imagegen/`：配置解析、参数校验、请求编码、响应解码和输出处理模块。
